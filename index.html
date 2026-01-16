@@ -1,17 +1,45 @@
 <!DOCTYPE html>
-<html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <title>Live Auscultation</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+    }
+    button {
+      padding: 10px 16px;
+      margin-right: 10px;
+      margin-top: 10px;
+    }
+    #status {
+      margin-top: 15px;
+      font-weight: bold;
+      color: #004aad;
+    }
+    #timer {
+      margin-top: 5px;
+      font-weight: bold;
+      color: #0a7c00;
+    }
+  </style>
+</head>
+
 <body>
 
-<button id="start">Start (Nakes)</button>
-<button id="join">Join (Dokter)</button>
-<div id="status" style="margin-top:10px; font-weight:bold; color:red;">
-  Menunggu dokter join...
-</div>
+  <h2>Live Auscultation (WebRTC)</h2>
 
-<audio id="audio" autoplay></audio>
+  <button id="start">NAKES START</button>
+  <button id="join">DOCTOR JOIN</button>
 
+  <div id="status">Status: Idle</div>
+  <div id="timer">Duration: 00:00:00</div>
 
-<script type="module" src="app.js"></script>
+  <audio id="audio" autoplay></audio>
+  <script type="module" src="app_v2.js"></script>
 
 </body>
 </html>
