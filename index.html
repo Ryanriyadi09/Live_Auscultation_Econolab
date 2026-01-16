@@ -1,265 +1,251 @@
 <!DOCTYPE html>
-<html lang="id">
+<html>
 <head>
-  <meta charset="UTF-8">
-  <title>Live Auscultation</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="utf-8">
+  <title>Tele-Stetoskop WebRTC</title>
+
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
 
   <style>
     body {
-      font-family: Arial, sans-serif;
+      font-family: Arial;
+      background: #f4f6f8;
       padding: 20px;
     }
     button {
-      padding: 10px 16px;
-      margin-right: 10px;
-      margin-top: 10px;
+      padding: 10px 20px;
+      margin: 5px;
+      font-size: 16px;
     }
     #status {
       margin-top: 15px;
       font-weight: bold;
-      color: #004aad;
+      color: #333;
     }
     #timer {
       margin-top: 5px;
-      font-weight: bold;
-      color: #0a7c00;
+      color: #007bff;
     }
   </style>
 </head>
 
 <body>
 
-<h2>Live Auscultation (WebRTC)</h2>
+<h2>Tele-Stetoskop WebRTC</h2>
 
-<button id="start">NAKES START</button>
-<button id="join">DOCTOR JOIN</button>
+<button id="nakes">NAKES (Create Room)</button>
+<button id="join">DOKTER (Join)</button>
+<button id="reset">RESET</button>
 
-<div id="status">Status: Idle</div>
-<div id="timer">Duration: 00:00:00</div>
+<div id="status">Idle</div>
+<div id="timer">00:00</div>
 
 <audio id="audio" autoplay></audio>
 
-<script type="module">
-
-/* ===============================
-   IMPORTS
-================================ */
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-import {
-  getFirestore, doc, setDoc, getDoc,
-  onSnapshot, collection, addDoc,
-  getDocs, deleteDoc
-} from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
-
-/* ===============================
+<script>
+/* ======================
    FIREBASE CONFIG
-================================ */
-const firebaseConfig = {
-  apiKey: "API_KEY_ANDA",
-  authDomain: "econolab-live-auscultation.firebaseapp.com",
-  projectId: "econolab-live-auscultation",
-};
+====================== */
+firebase.initializeApp({
+  apiKey: "ISI_API_KEY",
+  authDomain: "ISI_AUTH_DOMAIN",
+  projectId: "ISI_PROJECT_ID"
+});
 
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
+const db = firebase.firestore();
 
-/* ===============================
-   ROOM
-================================ */
+/* ======================
+   GLOBAL STATE
+====================== */
 const roomId = "LAB-001";
-const roomRef = doc(db, "rooms", roomId);
+const roomRef = db.collection("rooms").doc(roomId);
 
-/* ===============================
-   UI
-================================ */
-const statusDiv = document.getElementById("status");
-const timerDiv  = document.getElementById("timer");
-const audio     = document.getElementById("audio");
+let pc;
+let pendingCandidates = [];
+let startTime;
+let timerInterval;
+let sessionId = Date.now().toString();
 
-/* ===============================
-   STATE
-================================ */
-let pc = null;
-let timerInterval = null;
-let connectedAt = null;
-let currentSessionId = null;
-
-/* ===============================
+/* ======================
    WEBRTC CONFIG
-================================ */
+====================== */
 const rtcConfig = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" }
+  ]
 };
 
-/* ===============================
-   UTIL
-================================ */
-function formatDuration(ms) {
-  const t = Math.floor(ms / 1000);
-  const h = String(Math.floor(t / 3600)).padStart(2, "0");
-  const m = String(Math.floor((t % 3600) / 60)).padStart(2, "0");
-  const s = String(t % 60).padStart(2, "0");
-  return `${h}:${m}:${s}`;
+/* ======================
+   HELPERS
+====================== */
+function setStatus(msg) {
+  document.getElementById("status").innerText = msg;
 }
 
-/* ===============================
-   RESET ROOM (ANTI STUCK)
-================================ */
-async function resetRoom() {
-  const candRef = collection(roomRef, "candidates");
-  const snap = await getDocs(candRef);
+function startTimer() {
+  startTime = Date.now();
+  timerInterval = setInterval(() => {
+    const sec = Math.floor((Date.now() - startTime) / 1000);
+    const m = String(Math.floor(sec / 60)).padStart(2, "0");
+    const s = String(sec % 60).padStart(2, "0");
+    document.getElementById("timer").innerText = `${m}:${s}`;
+  }, 1000);
+}
 
-  for (const d of snap.docs) {
-    await deleteDoc(d.ref);
-  }
+function stopTimer() {
+  clearInterval(timerInterval);
+  document.getElementById("timer").innerText = "00:00";
+}
 
-  const sid = Date.now();
-  currentSessionId = sid;
+function canAddIce(pc) {
+  return pc &&
+         pc.remoteDescription &&
+         pc.remoteDescription.type &&
+         pc.signalingState === "stable";
+}
 
-  await setDoc(roomRef, {
-    offer: null,
-    answer: null,
-    doctorJoined: false,
-    connected: false,
-    connectedAt: null,
-    sessionId: sid
+function flushPendingIce() {
+  pendingCandidates.forEach(c => pc.addIceCandidate(c));
+  pendingCandidates = [];
+}
+
+/* ======================
+   LISTEN ICE
+====================== */
+function listenIce() {
+  roomRef.collection("candidates").onSnapshot(snap => {
+    snap.docChanges().forEach(change => {
+      const data = change.doc.data();
+      if (data.sessionId === sessionId) return;
+
+      const candidate = new RTCIceCandidate(data);
+
+      if (canAddIce(pc)) {
+        pc.addIceCandidate(candidate).catch(console.error);
+      } else {
+        pendingCandidates.push(candidate);
+      }
+    });
   });
-
-  if (timerInterval) {
-    clearInterval(timerInterval);
-    timerInterval = null;
-  }
-
-  timerDiv.innerText = "Duration: 00:00:00";
 }
 
-/* ===============================
-   CREATE PC
-================================ */
-function createPeerConnection() {
+/* ======================
+   NAKES (CREATE ROOM)
+====================== */
+document.getElementById("nakes").onclick = async () => {
+  setStatus("Waiting for doctor...");
+  stopTimer();
+
   pc = new RTCPeerConnection(rtcConfig);
-
-  pc.onicecandidate = e => {
-    if (e.candidate) {
-      addDoc(collection(roomRef, "candidates"), {
-        ...e.candidate.toJSON(),
-        sessionId: currentSessionId
-      });
-    }
-  };
-
-  pc.onconnectionstatechange = async () => {
-    if (pc.connectionState === "connected") {
-      statusDiv.innerText = "Status: Connection successful ✅";
-
-      await setDoc(roomRef, {
-        connected: true,
-        connectedAt: Date.now()
-      }, { merge: true });
-    }
-  };
-
-  pc.ontrack = e => {
-    audio.srcObject = e.streams[0];
-  };
-}
-
-/* ===============================
-   NAKES START
-================================ */
-document.getElementById("start").onclick = async () => {
-  if (pc) pc.close();
-  await resetRoom();
-
-  statusDiv.innerText = "Status: Waiting for doctor...";
-
-  createPeerConnection();
 
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   stream.getTracks().forEach(t => pc.addTrack(t, stream));
 
+  pc.onicecandidate = e => {
+    if (e.candidate) {
+      roomRef.collection("candidates").add({
+        ...e.candidate.toJSON(),
+        sessionId
+      });
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === "connected") {
+      setStatus("Connection successful");
+      startTimer();
+    }
+  };
+
+  listenIce();
+
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
 
-  await setDoc(roomRef, {
+  await roomRef.set({
     offer,
+    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
     doctorJoined: false
-  }, { merge: true });
+  });
+
+  roomRef.onSnapshot(snap => {
+    const d = snap.data();
+    if (d?.answer && !pc.currentRemoteDescription) {
+      pc.setRemoteDescription(d.answer).then(() => {
+        setTimeout(flushPendingIce, 50);
+      });
+    }
+    if (d?.doctorJoined) {
+      setStatus("Doctor joined, connecting...");
+    }
+  });
 };
 
-/* ===============================
-   DOCTOR JOIN
-================================ */
+/* ======================
+   DOKTER (JOIN)
+====================== */
 document.getElementById("join").onclick = async () => {
-  if (pc) pc.close();
+  setStatus("Joining room...");
+  stopTimer();
 
-  const snap = await getDoc(roomRef);
-  if (!snap.exists() || !snap.data().offer) {
-    alert("Room belum dibuat oleh nakes");
+  pc = new RTCPeerConnection(rtcConfig);
+
+  const audio = document.getElementById("audio");
+  pc.ontrack = e => audio.srcObject = e.streams[0];
+
+  pc.onicecandidate = e => {
+    if (e.candidate) {
+      roomRef.collection("candidates").add({
+        ...e.candidate.toJSON(),
+        sessionId
+      });
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === "connected") {
+      setStatus("Connection successful");
+      startTimer();
+    }
+  };
+
+  listenIce();
+
+  const snap = await roomRef.get();
+  if (!snap.exists) {
+    alert("Room belum dibuat");
     return;
   }
-
-  currentSessionId = snap.data().sessionId;
-  statusDiv.innerText = "Status: Doctor joined, connecting...";
-
-  createPeerConnection();
 
   await pc.setRemoteDescription(snap.data().offer);
 
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
 
-  await setDoc(roomRef, {
+  await roomRef.set({
     answer,
     doctorJoined: true
   }, { merge: true });
+
+  setTimeout(flushPendingIce, 50);
 };
 
-/* ===============================
-   ROOM LISTENER
-================================ */
-onSnapshot(roomRef, snap => {
-  const data = snap.data();
-  if (!data || !pc) return;
+/* ======================
+   RESET
+====================== */
+document.getElementById("reset").onclick = async () => {
+  stopTimer();
+  setStatus("Reset");
 
-  if (data.sessionId !== currentSessionId) return;
-
-  if (data.connected && data.connectedAt) {
-    connectedAt = data.connectedAt;
-
-    if (!timerInterval) {
-      timerInterval = setInterval(() => {
-        timerDiv.innerText =
-          "Duration: " + formatDuration(Date.now() - connectedAt);
-      }, 1000);
-    }
-  }
-
-  if (data.answer && !pc.currentRemoteDescription) {
-    pc.setRemoteDescription(data.answer);
-  }
-});
-
-/* ===============================
-   ICE LISTENER
-================================ */
-onSnapshot(collection(roomRef, "candidates"), snap => {
-  snap.docChanges().forEach(c => {
-    const d = c.doc.data();
-    if (pc && d.sessionId === currentSessionId) {
-      pc.addIceCandidate(d);
-    }
-  });
-});
-
-/* ===============================
-   CLEANUP ON RELOAD
-================================ */
-window.addEventListener("beforeunload", () => {
   if (pc) pc.close();
-});
 
+  const cand = await roomRef.collection("candidates").get();
+  cand.forEach(d => d.ref.delete());
+
+  await roomRef.delete();
+};
 </script>
+
 </body>
 </html>
