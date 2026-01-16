@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>WebRTC Auscultation Test</title>
+</head>
+<body>
+
+<h2>WebRTC Live Auscultation (TEST)</h2>
+
+<button onclick="startMic()">Start Mic (Nakes)</button>
+<button onclick="createOffer()">Create Offer</button>
+<br><br>
+
+<textarea id="offer" rows="6" cols="80" placeholder="Offer / Answer here"></textarea>
+<br><br>
+
+<button onclick="createAnswer()">Create Answer (Dokter)</button>
+<button onclick="setRemote()">Set Remote Description</button>
+
+<h3>Remote Audio</h3>
+<audio id="remoteAudio" autoplay controls></audio>
+
+<script>
+let pc;
+let localStream;
+
+const config = {
+  iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+};
+
+async function startMic() {
+  localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  pc = new RTCPeerConnection(config);
+
+  localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+  pc.ontrack = e => {
+    document.getElementById("remoteAudio").srcObject = e.streams[0];
+  };
+
+  pc.onicecandidate = e => {
+    if (!e.candidate) {
+      document.getElementById("offer").value =
+        JSON.stringify(pc.localDescription);
+    }
+  };
+}
+
+async function createOffer() {
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+}
+
+async function createAnswer() {
+  pc = new RTCPeerConnection(config);
+
+  pc.ontrack = e => {
+    document.getElementById("remoteAudio").srcObject = e.streams[0];
+  };
+
+  pc.onicecandidate = e => {
+    if (!e.candidate) {
+      document.getElementById("offer").value =
+        JSON.stringify(pc.localDescription);
+    }
+  };
+
+  const offer = JSON.parse(document.getElementById("offer").value);
+  await pc.setRemoteDescription(offer);
+
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+}
+
+async function setRemote() {
+  const desc = JSON.parse(document.getElementById("offer").value);
+  await pc.setRemoteDescription(desc);
+}
+</script>
+
+</body>
+</html>
