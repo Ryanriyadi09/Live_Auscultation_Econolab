@@ -92,8 +92,8 @@ document.getElementById("join").onclick = async () => {
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
 
-  await setDoc(roomRef, { answer }, { merge: true });
-  console.log("Answer sent");
+  await setDoc(roomRef, { answer, doctorJoined: true }, { merge: true });
+  console.log("Doctor joined");
 };
 
 // ==========================
@@ -123,4 +123,17 @@ onSnapshot(collection(roomRef, "candidates"), snap => {
 // ==========================
 navigator.mediaDevices.enumerateDevices().then(devices => {
   console.log("Audio devices:", devices);
+});
+
+
+
+const statusDiv = document.getElementById("status");
+
+onSnapshot(roomRef, snap => {
+  const data = snap.data();
+
+  if (data?.doctorJoined) {
+    statusDiv.textContent = "Dokter sudah terhubung";
+    statusDiv.style.color = "green";
+  }
 });
