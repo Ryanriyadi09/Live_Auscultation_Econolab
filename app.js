@@ -1,139 +1,167 @@
-// ==========================
-// FIREBASE IMPORT
-// ==========================
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
 import {
-  getFirestore,
-  doc,
-  setDoc,
-  getDoc,
-  onSnapshot,
-  collection,
-  addDoc
+    getFirestore, doc, setDoc, getDoc,
+    onSnapshot, collection, addDoc
 } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
 // ==========================
 // FIREBASE CONFIG
 // ==========================
 const firebaseConfig = {
-  apiKey: "AIzaSyCtBcx08j86yGohxoMdIFmze71bRpvNTDk",
-  authDomain: "econolab-live-auscultation.firebaseapp.com",
-  projectId: "econolab-live-auscultation",
+    apiKey: "ISI_API_KEY_ANDA",
+    authDomain: "econolab-live-auscultation.firebaseapp.com",
+    projectId: "econolab-live-auscultation",
 };
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
 // ==========================
-// ROOM CONFIG
+// ROOM
 // ==========================
-const roomId = "LAB-001"; // ganti sesuai ID pasien
+const roomId = "LAB-001";
 const roomRef = doc(db, "rooms", roomId);
 
 // ==========================
-// GLOBAL WEBRTC
+// UI
 // ==========================
-let pc = null;
-let localStream = null;
+const statusDiv = document.getElementById("status");
+const timerDiv = document.getElementById("timer");
+const audio = document.getElementById("audio");
 
+let pc = null;
+let timerInterval = null;
+let connectedAt = null;
+
+// ==========================
+// WEBRTC CONFIG
+// ==========================
 const rtcConfig = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
 };
 
 // ==========================
-// BUTTON: START (NAKES)
+// FORMAT DURATION
+// ==========================
+function formatDuration(ms) {
+    const total = Math.floor(ms / 1000);
+    const h = String(Math.floor(total / 3600)).padStart(2, "0");
+    const m = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
+    const s = String(total % 60).padStart(2, "0");
+    return `${h}:${m}:${s}`;
+}
+
+// ==========================
+// START (NAKES)
 // ==========================
 document.getElementById("start").onclick = async () => {
-  pc = new RTCPeerConnection(rtcConfig);
+    statusDiv.innerText = "Status: Waiting for doctor...";
 
-  localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+    pc = new RTCPeerConnection(rtcConfig);
 
-  pc.onicecandidate = e => {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(t => pc.addTrack(t, stream));
+
+    pc.onicecandidate = e => {
     if (e.candidate) {
-      addDoc(collection(roomRef, "candidates"), e.candidate.toJSON());
+        addDoc(collection(roomRef, "candidates"), e.candidate.toJSON());
     }
-  };
+    };
 
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
+    pc.onconnectionstatechange = async () => {
+    if (pc.connectionState === "connected") {
+        statusDiv.innerText = "Status: Connection successful ✅";
 
-  await setDoc(roomRef, { offer });
-  console.log("Offer sent");
+        await setDoc(roomRef, {
+        connected: true,
+        connectedAt: Date.now()
+        }, { merge: true });
+    }
+    };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    await setDoc(roomRef, {
+    offer,
+    doctorJoined: false,
+    connected: false
+    });
 };
 
 // ==========================
-// BUTTON: JOIN (DOKTER)
+// JOIN (DOKTER)
 // ==========================
 document.getElementById("join").onclick = async () => {
-  pc = new RTCPeerConnection(rtcConfig);
+    pc = new RTCPeerConnection(rtcConfig);
 
-  const audio = document.getElementById("audio");
-  audio.autoplay = true;
-
-  pc.ontrack = e => {
+    pc.ontrack = e => {
     audio.srcObject = e.streams[0];
-  };
+    };
 
-  pc.onicecandidate = e => {
+    pc.onicecandidate = e => {
     if (e.candidate) {
-      addDoc(collection(roomRef, "candidates"), e.candidate.toJSON());
+        addDoc(collection(roomRef, "candidates"), e.candidate.toJSON());
     }
-  };
+    };
 
-  const snap = await getDoc(roomRef);
-  if (!snap.exists()) {
+    pc.onconnectionstatechange = () => {
+    if (pc.connectionState === "connected") {
+        statusDiv.innerText = "Status: Connection successful ✅";
+    }
+    };
+
+    const snap = await getDoc(roomRef);
+    if (!snap.exists()) {
     alert("Room belum dibuat oleh nakes");
     return;
-  }
+    }
 
-  await pc.setRemoteDescription(snap.data().offer);
+    await pc.setRemoteDescription(snap.data().offer);
 
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
 
-  await setDoc(roomRef, { answer, doctorJoined: true }, { merge: true });
-  console.log("Doctor joined");
+    await setDoc(roomRef, {
+    answer,
+    doctorJoined: true
+    }, { merge: true });
 };
 
 // ==========================
-// LISTENER: ANSWER (NAKES)
+// ROOM LISTENER
 // ==========================
 onSnapshot(roomRef, snap => {
-  const data = snap.data();
-  if (data?.answer && pc && !pc.currentRemoteDescription) {
+    const data = snap.data();
+    if (!data) return;
+
+    if (data.doctorJoined && !data.connected) {
+    statusDiv.innerText = "Status: Doctor joined, connecting...";
+    }
+
+    if (data.connected && data.connectedAt) {
+    connectedAt = data.connectedAt;
+
+    if (!timerInterval) {
+        timerInterval = setInterval(() => {
+        timerDiv.innerText =
+            "Duration: " + formatDuration(Date.now() - connectedAt);
+        }, 1000);
+    }
+    }
+
+    if (data.answer && pc && !pc.currentRemoteDescription) {
     pc.setRemoteDescription(data.answer);
-    console.log("Answer received");
-  }
+    }
 });
 
 // ==========================
-// LISTENER: ICE CANDIDATE
+// ICE CANDIDATES
 // ==========================
 onSnapshot(collection(roomRef, "candidates"), snap => {
-  snap.docChanges().forEach(change => {
-    if (change.type === "added" && pc) {
-      pc.addIceCandidate(change.doc.data());
+    snap.docChanges().forEach(c => {
+    if (c.type === "added" && pc) {
+        pc.addIceCandidate(c.doc.data());
     }
-  });
-});
-
-// ==========================
-// DEBUG: LIST MIC DEVICES
-// ==========================
-navigator.mediaDevices.enumerateDevices().then(devices => {
-  console.log("Audio devices:", devices);
-});
-
-
-
-const statusDiv = document.getElementById("status");
-
-onSnapshot(roomRef, snap => {
-  const data = snap.data();
-
-  if (data?.doctorJoined) {
-    statusDiv.textContent = "Dokter sudah terhubung";
-    statusDiv.style.color = "green";
-  }
+    });
 });
