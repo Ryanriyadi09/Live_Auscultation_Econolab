@@ -1,167 +1,172 @@
+// ==========================
+// FIREBASE SETUP
+// ==========================
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
 import {
-    getFirestore, doc, setDoc, getDoc,
-    onSnapshot, collection, addDoc
+  getFirestore, doc, setDoc, getDoc,
+  collection, addDoc, onSnapshot, deleteDoc
 } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
-// ==========================
-// FIREBASE CONFIG
-// ==========================
 const firebaseConfig = {
-    apiKey: "ISI_API_KEY_ANDA",
-    authDomain: "econolab-live-auscultation.firebaseapp.com",
-    projectId: "econolab-live-auscultation",
+  apiKey: "AIzaSyCtBcx08j86yGohxoMdIFmze71bRpvNTDk",
+  authDomain: "econolab-live-auscultation.firebaseapp.com",
+  projectId: "econolab-live-auscultation"
 };
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
-// ==========================
-// ROOM
-// ==========================
 const roomId = "LAB-001";
 const roomRef = doc(db, "rooms", roomId);
+const candidatesRef = collection(roomRef, "candidates");
 
 // ==========================
-// UI
+// GLOBAL STATE
 // ==========================
-const statusDiv = document.getElementById("status");
-const timerDiv = document.getElementById("timer");
-const audio = document.getElementById("audio");
-
 let pc = null;
+let startTime = null;
 let timerInterval = null;
-let connectedAt = null;
 
-// ==========================
-// WEBRTC CONFIG
-// ==========================
 const rtcConfig = {
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+  iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
 };
 
+const statusEl = document.getElementById("status");
+const timerEl = document.getElementById("timer");
+
 // ==========================
-// FORMAT DURATION
+// TIMER
 // ==========================
-function formatDuration(ms) {
-    const total = Math.floor(ms / 1000);
-    const h = String(Math.floor(total / 3600)).padStart(2, "0");
-    const m = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
-    const s = String(total % 60).padStart(2, "0");
-    return `${h}:${m}:${s}`;
+function startTimer() {
+  startTime = Date.now();
+  timerInterval = setInterval(() => {
+    const sec = Math.floor((Date.now() - startTime) / 1000);
+    timerEl.innerText = `Running time: ${sec} sec`;
+  }, 1000);
 }
 
 // ==========================
-// START (NAKES)
+// AUDIO PIPELINE (MEDICAL)
+// ==========================
+async function getProcessedAudioTrack() {
+  const rawStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+      googEchoCancellation: false,
+      googNoiseSuppression: false,
+      googAutoGainControl: false,
+      googHighpassFilter: false
+    }
+  });
+
+  const audioCtx = new AudioContext({ sampleRate: 44100 });
+  const source = audioCtx.createMediaStreamSource(rawStream);
+
+  // BANDPASS (JANTUNG)
+  const bandpass = audioCtx.createBiquadFilter();
+  bandpass.type = "bandpass";
+  bandpass.frequency.value = 80;
+  bandpass.Q.value = 1;
+
+  // GAIN (PREAMP)
+  const gain = audioCtx.createGain();
+  gain.gain.value = 3;
+
+  // COMPRESSOR (RINGAN)
+  const compressor = audioCtx.createDynamicsCompressor();
+  compressor.threshold.value = -30;
+  compressor.ratio.value = 2;
+
+  source.connect(bandpass);
+  bandpass.connect(gain);
+  gain.connect(compressor);
+
+  const dest = audioCtx.createMediaStreamDestination();
+  compressor.connect(dest);
+
+  return dest.stream.getAudioTracks()[0];
+}
+
+// ==========================
+// BUTTON: START (NAKES)
 // ==========================
 document.getElementById("start").onclick = async () => {
-    statusDiv.innerText = "Status: Waiting for doctor...";
+  statusEl.innerText = "Status: Waiting for doctor...";
+  pc = new RTCPeerConnection(rtcConfig);
 
-    pc = new RTCPeerConnection(rtcConfig);
+  const audioTrack = await getProcessedAudioTrack();
+  pc.addTrack(audioTrack);
 
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    stream.getTracks().forEach(t => pc.addTrack(t, stream));
-
-    pc.onicecandidate = e => {
+  pc.onicecandidate = e => {
     if (e.candidate) {
-        addDoc(collection(roomRef, "candidates"), e.candidate.toJSON());
+      addDoc(candidatesRef, e.candidate.toJSON());
     }
-    };
+  };
 
-    pc.onconnectionstatechange = async () => {
-    if (pc.connectionState === "connected") {
-        statusDiv.innerText = "Status: Connection successful ✅";
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
 
-        await setDoc(roomRef, {
-        connected: true,
-        connectedAt: Date.now()
-        }, { merge: true });
-    }
-    };
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    await setDoc(roomRef, {
+  await setDoc(roomRef, {
     offer,
-    doctorJoined: false,
-    connected: false
-    });
+    createdAt: Date.now(),
+    doctorJoined: false
+  });
+
+  onSnapshot(roomRef, snap => {
+    const data = snap.data();
+    if (data?.answer && !pc.currentRemoteDescription) {
+      pc.setRemoteDescription(data.answer);
+      statusEl.innerText = "Status: Connection successful";
+      startTimer();
+    }
+  });
 };
 
 // ==========================
-// JOIN (DOKTER)
+// BUTTON: JOIN (DOKTER)
 // ==========================
 document.getElementById("join").onclick = async () => {
-    pc = new RTCPeerConnection(rtcConfig);
+  statusEl.innerText = "Status: Connecting...";
+  pc = new RTCPeerConnection(rtcConfig);
 
-    pc.ontrack = e => {
+  const audio = document.getElementById("audio");
+
+  pc.ontrack = e => {
     audio.srcObject = e.streams[0];
-    };
+  };
 
-    pc.onicecandidate = e => {
+  pc.onicecandidate = e => {
     if (e.candidate) {
-        addDoc(collection(roomRef, "candidates"), e.candidate.toJSON());
+      addDoc(candidatesRef, e.candidate.toJSON());
     }
-    };
+  };
 
-    pc.onconnectionstatechange = () => {
-    if (pc.connectionState === "connected") {
-        statusDiv.innerText = "Status: Connection successful ✅";
-    }
-    };
-
-    const snap = await getDoc(roomRef);
-    if (!snap.exists()) {
-    alert("Room belum dibuat oleh nakes");
+  const snap = await getDoc(roomRef);
+  if (!snap.exists()) {
+    alert("Room belum dibuat");
     return;
-    }
+  }
 
-    await pc.setRemoteDescription(snap.data().offer);
+  await pc.setRemoteDescription(snap.data().offer);
 
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
 
-    await setDoc(roomRef, {
+  await setDoc(roomRef, {
     answer,
     doctorJoined: true
-    }, { merge: true });
-};
+  }, { merge: true });
 
-// ==========================
-// ROOM LISTENER
-// ==========================
-onSnapshot(roomRef, snap => {
-    const data = snap.data();
-    if (!data) return;
+  statusEl.innerText = "Status: Connection successful";
+  startTimer();
 
-    if (data.doctorJoined && !data.connected) {
-    statusDiv.innerText = "Status: Doctor joined, connecting...";
-    }
-
-    if (data.connected && data.connectedAt) {
-    connectedAt = data.connectedAt;
-
-    if (!timerInterval) {
-        timerInterval = setInterval(() => {
-        timerDiv.innerText =
-            "Duration: " + formatDuration(Date.now() - connectedAt);
-        }, 1000);
-    }
-    }
-
-    if (data.answer && pc && !pc.currentRemoteDescription) {
-    pc.setRemoteDescription(data.answer);
-    }
-});
-
-// ==========================
-// ICE CANDIDATES
-// ==========================
-onSnapshot(collection(roomRef, "candidates"), snap => {
-    snap.docChanges().forEach(c => {
-    if (c.type === "added" && pc) {
-        pc.addIceCandidate(c.doc.data());
-    }
+  onSnapshot(candidatesRef, snapshot => {
+    snapshot.docChanges().forEach(change => {
+      if (change.type === "added") {
+        pc.addIceCandidate(change.doc.data()).catch(() => {});
+      }
     });
-});
+  });
+};
