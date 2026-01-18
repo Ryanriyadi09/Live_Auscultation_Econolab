@@ -1,27 +1,198 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="id">
 <head>
-  <meta charset="UTF-8" />
-  <title>Live Auscultation</title>
-  <style>
-    body { font-family: Arial; padding: 20px; }
-    button { padding: 10px 20px; margin-right: 10px; }
-    #status { margin-top: 20px; font-weight: bold; }
-    #timer { margin-top: 10px; color: green; }
-  </style>
+<meta charset="UTF-8">
+<title>Stetoskop Live WebRTC</title>
+<style>
+  body { font-family: Arial; padding: 20px }
+  button { padding: 10px 20px; margin: 5px }
+  #status { font-weight: bold; margin-top: 10px }
+  #timer { margin-top: 5px }
+  canvas { background:#111; margin-top:10px }
+</style>
 </head>
 <body>
 
-<h2>Live Auscultation</h2>
+<h2>WebRTC Stetoskop Digital</h2>
 
-<button id="start">Nakes – Start</button>
-<button id="join">Dokter – Join</button>
+<button id="nakesBtn">Nakes</button>
+<button id="doctorBtn">Dokter</button>
 
-<div id="status">Status: Idle</div>
+<div id="status">Idle</div>
 <div id="timer"></div>
 
-<audio id="audio" autoplay></audio>
+<canvas id="vu" width="300" height="40"></canvas>
 
-<script type="module" src="app.js"></script>
+<audio id="audio" autoplay playsinline></audio>
+
+<!-- Firebase -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+import {
+  getFirestore, doc, setDoc, getDoc,
+  collection, addDoc, onSnapshot, deleteDoc, getDocs
+} from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+/* ==========================
+   FIREBASE CONFIG
+========================== */
+const firebaseConfig = {
+  apiKey: "ISI_DARI_FIREBASE",
+  authDomain: "PROJECT.firebaseapp.com",
+  projectId: "PROJECT-ID",
+};
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+
+/* ==========================
+   GLOBAL
+========================== */
+const roomId = "LAB-001";
+const roomRef = doc(db, "rooms", roomId);
+let pc, localStream;
+let startTime, timerInt;
+
+const rtcConfig = {
+  iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+};
+
+const statusEl = document.getElementById("status");
+const timerEl = document.getElementById("timer");
+const audioEl = document.getElementById("audio");
+
+/* ==========================
+   UTIL
+========================== */
+function setStatus(txt){ statusEl.innerText = txt }
+
+function startTimer(){
+  startTime = Date.now();
+  timerInt = setInterval(()=>{
+    const s = Math.floor((Date.now()-startTime)/1000);
+    timerEl.innerText = `Running: ${s}s`;
+  },1000);
+}
+
+async function cleanupRoom(){
+  const cols = ["candidates","answerCandidates"];
+  for(const c of cols){
+    const snap = await getDocs(collection(roomRef,c));
+    snap.forEach(d=>deleteDoc(d.ref));
+  }
+}
+
+/* ==========================
+   VU METER
+========================== */
+function startVUMeter(stream){
+  const ctx = new AudioContext();
+  ctx.resume();
+
+  const src = ctx.createMediaStreamSource(stream);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 256;
+  src.connect(analyser);
+
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  const canvas = document.getElementById("vu");
+  const c = canvas.getContext("2d");
+
+  function draw(){
+    analyser.getByteFrequencyData(data);
+    const level = data.reduce((a,b)=>a+b)/data.length;
+    c.clearRect(0,0,canvas.width,canvas.height);
+    c.fillStyle="lime";
+    c.fillRect(0,0,level*2,canvas.height);
+    requestAnimationFrame(draw);
+  }
+  draw();
+}
+
+/* ==========================
+   NAKES
+========================== */
+document.getElementById("nakesBtn").onclick = async ()=>{
+  setStatus("Waiting for doctor...");
+  await cleanupRoom();
+
+  pc = new RTCPeerConnection(rtcConfig);
+
+  localStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation:false,
+      noiseSuppression:false,
+      autoGainControl:false
+    }
+  });
+
+  localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
+  startVUMeter(localStream);
+
+  pc.onicecandidate = e=>{
+    if(e.candidate)
+      addDoc(collection(roomRef,"candidates"), e.candidate.toJSON());
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  await setDoc(roomRef,{offer,created:Date.now()});
+
+  onSnapshot(roomRef,snap=>{
+    const d = snap.data();
+    if(d?.answer && !pc.currentRemoteDescription){
+      pc.setRemoteDescription(d.answer);
+      setStatus("Connection successful");
+      startTimer();
+    }
+  });
+
+  onSnapshot(collection(roomRef,"answerCandidates"), snap=>{
+    snap.docChanges().forEach(c=>{
+      if(c.type==="added" && pc.remoteDescription)
+        pc.addIceCandidate(c.doc.data());
+    });
+  });
+};
+
+/* ==========================
+   DOCTOR
+========================== */
+document.getElementById("doctorBtn").onclick = async ()=>{
+  pc = new RTCPeerConnection(rtcConfig);
+  setStatus("Connecting...");
+
+  pc.ontrack = e=>{
+    audioEl.srcObject = e.streams[0];
+    audioEl.play();
+    startVUMeter(e.streams[0]);
+  };
+
+  pc.onicecandidate = e=>{
+    if(e.candidate)
+      addDoc(collection(roomRef,"answerCandidates"), e.candidate.toJSON());
+  };
+
+  const snap = await getDoc(roomRef);
+  if(!snap.exists()){
+    alert("Room belum dibuat");
+    return;
+  }
+
+  await pc.setRemoteDescription(snap.data().offer);
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  await setDoc(roomRef,{answer,doctorJoined:true},{merge:true});
+
+  onSnapshot(collection(roomRef,"candidates"), snap=>{
+    snap.docChanges().forEach(c=>{
+      if(c.type==="added" && pc.remoteDescription)
+        pc.addIceCandidate(c.doc.data());
+    });
+  });
+
+  setStatus("Connection successful");
+  startTimer();
+};
+</script>
 </body>
 </html>
