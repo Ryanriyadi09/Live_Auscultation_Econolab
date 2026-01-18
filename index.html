@@ -1,251 +1,27 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>Tele-Stetoskop WebRTC</title>
-
-  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
-
+  <meta charset="UTF-8" />
+  <title>Live Auscultation</title>
   <style>
-    body {
-      font-family: Arial;
-      background: #f4f6f8;
-      padding: 20px;
-    }
-    button {
-      padding: 10px 20px;
-      margin: 5px;
-      font-size: 16px;
-    }
-    #status {
-      margin-top: 15px;
-      font-weight: bold;
-      color: #333;
-    }
-    #timer {
-      margin-top: 5px;
-      color: #007bff;
-    }
+    body { font-family: Arial; padding: 20px; }
+    button { padding: 10px 20px; margin-right: 10px; }
+    #status { margin-top: 20px; font-weight: bold; }
+    #timer { margin-top: 10px; color: green; }
   </style>
 </head>
-
 <body>
 
-<h2>Tele-Stetoskop Econolab</h2>
+<h2>Live Auscultation</h2>
 
-<button id="nakes">NAKES (Create Room)</button>
-<button id="join">DOKTER (Join)</button>
-<button id="reset">RESET</button>
+<button id="start">Nakes – Start</button>
+<button id="join">Dokter – Join</button>
 
-<div id="status">Idle</div>
-<div id="timer">00:00</div>
+<div id="status">Status: Idle</div>
+<div id="timer"></div>
 
 <audio id="audio" autoplay></audio>
 
-<script>
-/* ======================
-   FIREBASE CONFIG
-====================== */
-firebase.initializeApp({
-  apiKey: "AIzaSyCtBcx08j86yGohxoMdIFmze71bRpvNTDk",
-  authDomain: "econolab-live-auscultation.firebaseapp.com",
-  projectId: "econolab-live-auscultation"
-});
-
-const db = firebase.firestore();
-
-/* ======================
-   GLOBAL STATE
-====================== */
-const roomId = "LAB-001";
-const roomRef = db.collection("rooms").doc(roomId);
-
-let pc;
-let pendingCandidates = [];
-let startTime;
-let timerInterval;
-let sessionId = Date.now().toString();
-
-/* ======================
-   WEBRTC CONFIG
-====================== */
-const rtcConfig = {
-  iceServers: [
-    { urls: "stun:stun.l.google.com:19302" }
-  ]
-};
-
-/* ======================
-   HELPERS
-====================== */
-function setStatus(msg) {
-  document.getElementById("status").innerText = msg;
-}
-
-function startTimer() {
-  startTime = Date.now();
-  timerInterval = setInterval(() => {
-    const sec = Math.floor((Date.now() - startTime) / 1000);
-    const m = String(Math.floor(sec / 60)).padStart(2, "0");
-    const s = String(sec % 60).padStart(2, "0");
-    document.getElementById("timer").innerText = `${m}:${s}`;
-  }, 1000);
-}
-
-function stopTimer() {
-  clearInterval(timerInterval);
-  document.getElementById("timer").innerText = "00:00";
-}
-
-function canAddIce(pc) {
-  return pc &&
-         pc.remoteDescription &&
-         pc.remoteDescription.type &&
-         pc.signalingState === "stable";
-}
-
-function flushPendingIce() {
-  pendingCandidates.forEach(c => pc.addIceCandidate(c));
-  pendingCandidates = [];
-}
-
-/* ======================
-   LISTEN ICE
-====================== */
-function listenIce() {
-  roomRef.collection("candidates").onSnapshot(snap => {
-    snap.docChanges().forEach(change => {
-      const data = change.doc.data();
-      if (data.sessionId === sessionId) return;
-
-      const candidate = new RTCIceCandidate(data);
-
-      if (canAddIce(pc)) {
-        pc.addIceCandidate(candidate).catch(console.error);
-      } else {
-        pendingCandidates.push(candidate);
-      }
-    });
-  });
-}
-
-/* ======================
-   NAKES (CREATE ROOM)
-====================== */
-document.getElementById("nakes").onclick = async () => {
-  setStatus("Waiting for doctor...");
-  stopTimer();
-
-  pc = new RTCPeerConnection(rtcConfig);
-
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  stream.getTracks().forEach(t => pc.addTrack(t, stream));
-
-  pc.onicecandidate = e => {
-    if (e.candidate) {
-      roomRef.collection("candidates").add({
-        ...e.candidate.toJSON(),
-        sessionId
-      });
-    }
-  };
-
-  pc.onconnectionstatechange = () => {
-    if (pc.connectionState === "connected") {
-      setStatus("Connection successful");
-      startTimer();
-    }
-  };
-
-  listenIce();
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-
-  await roomRef.set({
-    offer,
-    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-    doctorJoined: false
-  });
-
-  roomRef.onSnapshot(snap => {
-    const d = snap.data();
-    if (d?.answer && !pc.currentRemoteDescription) {
-      pc.setRemoteDescription(d.answer).then(() => {
-        setTimeout(flushPendingIce, 50);
-      });
-    }
-    if (d?.doctorJoined) {
-      setStatus("Doctor joined, connecting...");
-    }
-  });
-};
-
-/* ======================
-   DOKTER (JOIN)
-====================== */
-document.getElementById("join").onclick = async () => {
-  setStatus("Joining room...");
-  stopTimer();
-
-  pc = new RTCPeerConnection(rtcConfig);
-
-  const audio = document.getElementById("audio");
-  pc.ontrack = e => audio.srcObject = e.streams[0];
-
-  pc.onicecandidate = e => {
-    if (e.candidate) {
-      roomRef.collection("candidates").add({
-        ...e.candidate.toJSON(),
-        sessionId
-      });
-    }
-  };
-
-  pc.onconnectionstatechange = () => {
-    if (pc.connectionState === "connected") {
-      setStatus("Connection successful");
-      startTimer();
-    }
-  };
-
-  listenIce();
-
-  const snap = await roomRef.get();
-  if (!snap.exists) {
-    alert("Room belum dibuat");
-    return;
-  }
-
-  await pc.setRemoteDescription(snap.data().offer);
-
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-
-  await roomRef.set({
-    answer,
-    doctorJoined: true
-  }, { merge: true });
-
-  setTimeout(flushPendingIce, 50);
-};
-
-/* ======================
-   RESET
-====================== */
-document.getElementById("reset").onclick = async () => {
-  stopTimer();
-  setStatus("Reset");
-
-  if (pc) pc.close();
-
-  const cand = await roomRef.collection("candidates").get();
-  cand.forEach(d => d.ref.delete());
-
-  await roomRef.delete();
-};
-</script>
-
+<script type="module" src="app_v3.js"></script>
 </body>
 </html>
